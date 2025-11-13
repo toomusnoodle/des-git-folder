@@ -2,6 +2,9 @@
 # so -1 is done on all called positions
 
 # Initial Permutation (IP)
+
+import os
+
 ip = [
     58, 50, 42, 34, 26, 18, 10, 2,
     60, 52, 44, 36, 28, 20, 12, 4,
@@ -127,23 +130,47 @@ shifts = [1, 1, 2, 2, 2, 2, 2, 2, 1, 2, 2, 2, 2, 2, 2, 1]
 
 def ascii_to_bits_in_list(h: list) -> list:
     """
-    Converts a 1-8 character ASCII string into 64 bits (PKCS-style padding).
+    Converts a 1-8 character ASCII string into bits
+    PKCS-style padding blocks 8 byte long
     Returns the bits as a list of '0' and '1' strings.
     """
     list_to_dec = [ord(c) for c in h]
 
-    # PKCS-style padding to make 8 bytes
     list_of_64bit_inputs = []
 
-    # Creates new list with padding using previous list
-    for x in range(8):
+    block_amount = len(list_to_dec) // 8 + 1
+    for x in range(block_amount*8):
         if x < len(list_to_dec):
             list_of_64bit_inputs.append(list_to_dec[x])
         else:
-            list_of_64bit_inputs.append(8-len(list_to_dec))
-
+            list_of_64bit_inputs.append((block_amount*8)-len(list_to_dec))
     input_as_bits = "".join([format(x, "08b") for x in list_of_64bit_inputs])
     return list(input_as_bits)
+
+
+def bits_to_blocks(plaintext_as_bits: list) -> list:
+    """
+    Takes list of bits that's divisible by 64, and returns into a list,
+    of 64 length lists.
+    """
+    plaintext_as_bits_list = [bit for bit in plaintext_as_bits]
+    plaintext_as_blocks = []
+    for x in range(0, int(len(plaintext_as_bits_list)/64)):
+        plaintext_as_blocks.append([])
+        plaintext_as_blocks[x] = plaintext_as_bits_list[x*64:x*64+64]
+
+    return plaintext_as_blocks
+
+
+def create_initialization_vector() -> list:
+    """
+    Generates 8 random bytes using os.urandom
+    """
+    iv = os.urandom(8)
+
+    iv_as_bits = list("".join([format(x, "08b") for x in iv]))
+
+    return iv_as_bits
 
 
 def pc1_permutation(bits_list_64: list) -> list:
@@ -172,88 +199,114 @@ def generate_subkeys(pci1_56bit_input: list) -> list:
     return ki
 
 
-def xor_round_substitution(ascii_to_binary: list, kn: list) -> str:
+def xor_round_substitution(plaintext_blocks: list, kn: list, iv: list) -> str:
     """
-    DES round function: applies XOR with subkeys, S-box substitution,
-    permutation, and finally returns 64-bit cipher text in hexadecimal.
+    Block formula for first block = C_1=E_K (P_1⊕IV)
+    Block formula for blocks after first = C_n=E_K (P_n⊕C_(n-1))
+    DES round function applied 16 times per block:
+    IP, applies XOR with subkeys, S-box substitution & permutation (SP),
+    LN = previous RN, RN = previous LN XOR with SP
+    Final output = IV|C1|C2|...
     """
-    # Initial permutation
-    ip_applied = [ascii_to_binary[ip[y] - 1] for y in range(64)]
-    ln = ip_applied[:32]
-    rn = ip_applied[32:]
+    current_cn = []
+    cn_list = []
+    for block in range(0, len(plaintext_blocks)):
+        # First block XOR with IV
+        # Next blocks XOR with their previos block's DES Cn output
+        plaintext_block_with_xor = []
+        if block == 0:
+            plaintext_block_with_xor = [
+                str(
+                    int(a) ^ int(b)
+                ) for a, b in zip(plaintext_blocks[block], iv)
+                ]
+        else:
+            plaintext_block_with_xor = [
+                str(int(a) ^ int(b))
+                for a, b in zip(plaintext_blocks[block], current_cn)
+            ]
 
-    for round_number in range(16):
-        # Expand RN from 32 to 48 bits
-        expanded_rn = [rn[e[y] - 1] for y in range(48)]
+        # Initial permitation is applied
+        ip_applied = [plaintext_block_with_xor[ip[y] - 1] for y in range(64)]
+        ln = ip_applied[:32]
+        rn = ip_applied[32:]
 
-        # XOR with round subkey
-        xored = [
-            int(a) ^ int(b) for a, b in zip(expanded_rn, kn[round_number])
-        ]
+        for round_number in range(16):
+            # Expand RN from 32 to 48 bits
+            expanded_rn = [rn[e[y] - 1] for y in range(48)]
 
-        # Divide into eight 6-bit blocks
-        xored_into_sixths = [xored[i:i + 6] for i in range(0, 48, 6)]
+            # XOR with round subkey
+            xored = [
+                int(a) ^ int(b) for a, b in zip(expanded_rn, kn[round_number])
+            ]
 
-        # S-box substitution
-        substitution_n = []
-        for x in range(0, 8):
-            # Bits are shifted to combine column and row information
-            # grouped 1 << 6, 2 << 3 << 4 << 5, example 011001 is 01 and 1100
-            row_value = (
-                xored_into_sixths[x][0] << 1
-            ) | xored_into_sixths[x][5]
-            column_value = 0
-            for bit in [xored_into_sixths[x][1], xored_into_sixths[x][2],
-                        xored_into_sixths[x][3], xored_into_sixths[x][4]]:
-                column_value = (column_value << 1) | bit
-            substitution_n.append(sbox[x][row_value][column_value])
+            # Divide into eight 6-bit blocks
+            xored_into_sixths = [xored[i:i + 6] for i in range(0, 48, 6)]
 
-        # Convert int to 4-bit binary and combine
-        sub_full_as_32bits = list(
-            "".join([format(x, "04b") for x in substitution_n])
-        )
+            # S-box substitution
+            substitution_n = []
+            for x in range(0, 8):
+                # Bits are shifted to combine column and row information
+                # grouped 1 << 6, 2 << 3 << 4 << 5,
+                # example 011001 is 01 and 1100
+                row_value = (
+                    xored_into_sixths[x][0] << 1
+                ) | xored_into_sixths[x][5]
+                column_value = 0
+                for bit in [xored_into_sixths[x][1], xored_into_sixths[x][2],
+                            xored_into_sixths[x][3], xored_into_sixths[x][4]]:
+                    column_value = (column_value << 1) | bit
+                substitution_n.append(sbox[x][row_value][column_value])
 
-        # Permutation P
-        permutated_substituted_32 = [
-            sub_full_as_32bits[p[y] - 1] for y in range(32)
-        ]
-
-        # LN and RN swap/update
-        ln_old = ln
-        ln = rn
-        rn = [
-            str(int(a) ^ int(b)) for a, b in zip(
-                ln_old, permutated_substituted_32
+            # Convert int to 4-bit binary and combine
+            sub_full_as_32bits = list(
+                "".join([format(x, "04b") for x in substitution_n])
             )
-        ]
 
-    # Final permutation after 16 rounds (swap halves)
-    final_cypher = rn + ln
-    final_permutation_applied = [final_cypher[fp[y] - 1] for y in range(64)]
+            # Permutation P
+            permutated_substituted_32 = [
+                sub_full_as_32bits[p[y] - 1] for y in range(32)
+            ]
 
-    # Convert to hexadecimal
-    final_permutation_applied = "".join(final_permutation_applied)
-    return hex(int(final_permutation_applied, 2))[2:].zfill(16)
+            # LN and RN swap/update
+            ln_old = ln
+            ln = rn
+            rn = [
+                str(int(a) ^ int(b)) for a, b in zip(
+                    ln_old, permutated_substituted_32
+                )
+            ]
+
+        # Final permutation after 16 rounds (swap halves)
+        rn_ln = rn + ln
+        current_cn = [rn_ln[fp[y] - 1] for y in range(64)]
+        cn_list.append(current_cn)
+    # Final output is IV concatenated with all ciphertext blocks
+    final_output = "".join(iv)
+    for cn in cn_list:
+        final_output += "".join(cn)
+    hex_length = len(final_output) // 4
+    return hex(int(final_output, 2))[2:].zfill(hex_length)
 
 
 def des_encrypt(plaintext: list, key: list) -> str:
     """
-    Performs DES encryption for one 64-bit block of plaintext.
+    Performs DES encryption for 64-bit block/blocks of plaintext.
     """
     key_bits = ascii_to_bits_in_list(key)
     plaintext_bits = ascii_to_bits_in_list(plaintext)
     subkeys = generate_subkeys(pc1_permutation(key_bits))
-    return xor_round_substitution(plaintext_bits, subkeys)
+    plaintext_blocks = bits_to_blocks(plaintext_bits)
+    iv = create_initialization_vector()
+    return xor_round_substitution(plaintext_blocks, subkeys, iv)
 
 
 def main():
-    key = list("12345678")
-    plaintext_input = list("12345678")
+    key = list("")
+    plaintext_input = list("")
     ciphertext = des_encrypt(plaintext_input, key)
     print("Ciphertext:", ciphertext)
 
 
 if __name__ == "__main__":
     main()
-
-# Todo, %PEP-8, %Flake8 linter, %Dogtags, %Typing, Testing for individual functions
